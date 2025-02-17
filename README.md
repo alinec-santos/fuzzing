@@ -8,5 +8,5 @@ Este repositório contém códigos e ferramentas relacionadas à pesquisa de **f
 - Testes automatizados
 - Análise de vulnerabilidades
 
-## Objetivo:
+### Objetivo:
 Este repositório foi criado para monitorar o progresso no desenvolvimento de uma ferramenta de fuzzing, com o intuito de auxiliar na identificação de vulnerabilidades e ameaças em smart contracts. O projeto está em colaboração com o Instituto LESC, focando em técnicas de segurança para melhorar a robustez de contratos inteligentes.
