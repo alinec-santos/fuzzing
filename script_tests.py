@@ -27,12 +27,18 @@ def compile_smartcontract(contract_filename, source_code):
 
     solcx.set_solc_version(solc_version, True)
 
+    # Ajuste da evmVersion com base na versão do Solidity
+    if solc_version.startswith("0.4."):
+        evm_version = "petersburg"  # ou "petersburg" para versões mais recentes do Solidity 0.4.x
+    else:
+        evm_version = "cancun"  # Mantém "cancun" para versões mais recentes do Solidity
+
     compiler_output = solcx.compile_standard({
         'language': 'Solidity',
         'sources': {contract_filename: {'content': source_code}},
         'settings': {
             "optimizer": {"enabled": True, "runs": 200},
-            "evmVersion": "cancun",
+            "evmVersion": evm_version,  
             "outputSelection": {
                 contract_filename: {
                     "*": [
@@ -58,10 +64,48 @@ def connect_in_blockchain(url):
     print("Error during the connection with the blockchain!")
     return None
 
+def get_constructor_args(abi):
+    for item in abi:
+        if item['type'] == 'constructor':
+            return item['inputs']  # Retorna a lista de argumentos do construtor
+    return None  # Retorna None se não houver construtor
+
+def generate_constructor_args(abi):
+    constructor_inputs = get_constructor_args(abi)
+    if not constructor_inputs:
+        return None  # Retorna None se não houver construtor
+
+    args = {}
+    for input_param in constructor_inputs:
+        param_type = input_param['type']
+        if param_type == 'uint256':
+            value = random.randint(0, 2**256 - 1)
+        elif param_type == 'address':
+            value = Web3.to_checksum_address('0x' + ''.join(random.choices('0123456789abcdef', k=40)))
+        elif param_type == 'string':
+            value = ''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', k=random.randint(5, 15)))
+        elif param_type == 'bool':
+            value = random.choice([True, False])
+        elif param_type.startswith('bytes'):
+            size = int(param_type.replace('bytes', '')) if len(param_type) > 5 else random.randint(1, 32)
+            value = '0x' + ''.join(random.choices('0123456789abcdef', k=size*2))
+        else:
+            value = None  # Tipos não suportados são ignorados
+        if value is not None:
+            args[input_param['name']] = value
+    return args
+
 # Função para fazer o deploy do contrato
-def deploy_smartcontract(w3, abi, bytecode):
+def deploy_smartcontract(w3, abi, bytecode, constructor_args=None):
     smart_contract = w3.eth.contract(abi=abi, bytecode=bytecode)
-    tx_hash = smart_contract.constructor().transact()
+    
+    if constructor_args:
+        # Se o construtor exigir argumentos
+        tx_hash = smart_contract.constructor(*constructor_args).transact()
+    else:
+        # Construtor sem argumentos
+        tx_hash = smart_contract.constructor().transact()
+    
     tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
     contract_address = tx_receipt.contractAddress
     print(f"Contract Address: {contract_address}")
@@ -207,7 +251,7 @@ def detect_reentrancy(instruction, source_map):
 
     return None
 
-def genetic_fuzzer(w3, abi, contract_instance, source_map, generations=1, population_size=1):
+def genetic_fuzzer(w3, abi, contract_instance, source_map, generations=3, population_size=1):
     population = [generate_random_inputs(abi) for _ in range(population_size)]
     coverage_map = {}
     total_pcs = len(source_map.instr_positions) if source_map.instr_positions else 1  # Evita divisão por zero
@@ -217,13 +261,22 @@ def genetic_fuzzer(w3, abi, contract_instance, source_map, generations=1, popula
         for inputs in population:
             for func in inputs:
                 func_name = func['name']
-                func_inputs = func['inputs'] if func['inputs'] else []
+                func_inputs = func['inputs'] if len(func['inputs']) > 0 else None
                 func_state = func['stateMutability']
                 value = 0
                 
                 if func_state == 'payable':
                     value = random.randint(1, 10**18)  # Valor aleatório para funções payable
                     print(f"Transaction `{func_name}` received random input value: {value}")
+                
+                # Se a função for 'withdraw', deposite Ether primeiro
+                if func_name == 'withdraw':
+                    deposit_value = random.randint(1, 10**18)  # Deposite um valor aleatório
+                    print(f"Depositando {deposit_value} wei antes de sacar...")
+                    deposit_receipt = simulate_transaction(w3, contract_instance, 'deposit', value=deposit_value)
+                    if not deposit_receipt:
+                        print("Erro ao depositar Ether. Ignorando saque.")
+                        continue
                 
                 tx_receipt = simulate_transaction(w3, contract_instance, func_name, func_inputs, value)
                 
@@ -239,13 +292,12 @@ def genetic_fuzzer(w3, abi, contract_instance, source_map, generations=1, popula
                         for instruction in result.structLogs:
                             pc = detect_reentrancy(instruction, source_map)
                             #if pc:
-                               # print(f"Detected reentrancy in {func_name}: {pc}")
+                                #print(f"Detected reentrancy in {func_name}: {pc}")
         
         if total_pcs > 0:  # Só calcula a cobertura se total_pcs for maior que zero
             calculate_coverage(coverage_map, total_pcs)
         else:
             print("Total PCs is zero. Cannot calculate coverage.")
-
 # Classe para mapear o código-fonte
 class Source:
     def __init__(self, filename):
@@ -326,8 +378,8 @@ class SourceMap:
 
 # Função principal
 if __name__ == "__main__":
-    contract_filename = "EtherStorev2.sol"
-    contract_name = "EtherStore"
+    contract_filename = "./reentrancy/ACCURAL_DEPOSIT.sol"
+    contract_name = "ACCURAL_DEPOSIT"
 
     with open(contract_filename, 'r') as file:
         source_code = file.read()
@@ -343,7 +395,14 @@ if __name__ == "__main__":
     blockhain_url = "http://127.0.0.1:8545"
     w3_conn = connect_in_blockchain(blockhain_url)
     if w3_conn is not None:
-        contract_instance = deploy_smartcontract(w3_conn, abi, bytecode)
+        # Gera argumentos para o construtor, se necessário
+        constructor_args = generate_constructor_args(abi)
+        if constructor_args:
+            constructor_args = list(constructor_args.values())  # Converte o dicionário para uma lista
+        else:
+            constructor_args = None  # Sem construtor ou construtor sem argumentos
+
+        contract_instance = deploy_smartcontract(w3_conn, abi, bytecode, constructor_args)
     
     source_map = SourceMap(f"{contract_filename}:{contract_name}", compiler_output)
     genetic_fuzzer(w3_conn, abi, contract_instance, source_map)
